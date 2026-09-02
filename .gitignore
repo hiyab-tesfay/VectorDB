@@ -1,0 +1,6 @@
+build/
+*.mvdb
+*.mvdb.tmp
+compile_commands.json
+.DS_Store
+

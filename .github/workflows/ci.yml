@@ -1,0 +1,13 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check project size
+        run: test "$(wc -l CMakeLists.txt include/*.hpp src/*.cpp tests/*.cpp bench/*.cpp | tail -1 | awk '{print $1}')" -le 600
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+
