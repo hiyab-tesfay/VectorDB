@@ -1,8 +1,12 @@
 #include "minivdb.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <set>
 #include <vector>
@@ -44,6 +48,24 @@ int main() {
   cosine.save(path);
   const auto loaded = minivdb::Index::load(path);
   check(loaded.search(std::vector<float>{1, 0}, 3)[0].id == 1, "save/load");
+  const auto rejects_corruption = [&](std::streamoff offset, const auto& value) {
+    cosine.save(path);
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.exceptions(std::ios::failbit | std::ios::badbit);
+    file.seekp(offset);
+    file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    file.close();
+    return throws([&] { minivdb::Index::load(path); });
+  };
+  check(rejects_corruption(45, std::int32_t{32}), "reject inconsistent entry level");
+  check(rejects_corruption(49, UINT32_MAX), "reject impossible node count");
+  check(rejects_corruption(62, std::array<float, 2>{}), "reject zero cosine vector");
+  check(rejects_corruption(62, std::array<float, 2>{2, 0}), "reject unnormalized cosine vector");
+  check(rejects_corruption(62, std::numeric_limits<float>::quiet_NaN()), "reject nonfinite vector");
+  check(rejects_corruption(70, std::uint32_t{100}), "reject excess graph degree");
+  cosine.save(path);
+  std::filesystem::resize_file(path, 70);
+  check(throws([&] { minivdb::Index::load(path); }), "reject truncated index");
   std::filesystem::remove(path);
 
   constexpr std::size_t count = 600, dimensions = 16, queries = 30, k = 10;
@@ -69,4 +91,3 @@ int main() {
   if (failures == 0) std::cout << "all tests passed\n";
   return failures == 0 ? 0 : 1;
 }
-

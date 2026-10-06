@@ -26,6 +26,13 @@ T read(std::istream& in) {
   if (!in) throw std::runtime_error("truncated index file");
   return value;
 }
+
+std::uintmax_t remaining(std::istream& in, std::uintmax_t length) {
+  const auto offset = static_cast<std::streamoff>(in.tellg());
+  if (offset < 0 || static_cast<std::uintmax_t>(offset) > length)
+    throw std::runtime_error("invalid index file length");
+  return length - static_cast<std::uintmax_t>(offset);
+}
 }  // namespace
 
 Metric parse_metric(std::string_view name) {
@@ -40,6 +47,9 @@ std::string_view metric_name(Metric metric) noexcept {
 
 Index::Index(Options options) : options_(options), random_state_(options.seed) {
   if (options.dimensions == 0) throw std::invalid_argument("dimensions must be positive");
+  const auto limit = std::numeric_limits<std::uint32_t>::max();
+  if (options.dimensions > limit || options.max_connections > limit || options.ef_construction > limit)
+    throw std::invalid_argument("options exceed binary format limits");
   if (options.metric != Metric::cosine && options.metric != Metric::l2)
     throw std::invalid_argument("invalid metric");
   if (options.max_connections < 2) throw std::invalid_argument("M must be at least 2");
@@ -239,11 +249,14 @@ void Index::save(const std::filesystem::path& path) const {
       for (auto neighbor : layer) write(out, neighbor);
     }
   }
+  out.close();
+  if (!out) throw std::runtime_error("failed to write index");
 }
 
 Index Index::load(const std::filesystem::path& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) throw std::runtime_error("cannot open index file");
+  const auto length = std::filesystem::file_size(path);
   std::array<char, 8> header{};
   in.read(header.data(), header.size());
   if (header != magic) throw std::runtime_error("invalid index file");
@@ -258,6 +271,11 @@ Index Index::load(const std::filesystem::path& path) {
   index.entry_ = read<std::int64_t>(in);
   index.max_level_ = read<std::int32_t>(in);
   const auto count = read<std::uint32_t>(in);
+  const auto minimum_node_size = sizeof(std::uint64_t) + sizeof(std::uint8_t) +
+                                 sizeof(std::uint32_t) +
+                                 static_cast<std::uintmax_t>(options.dimensions) * sizeof(float);
+  if (count > remaining(in, length) / minimum_node_size)
+    throw std::runtime_error("invalid node count");
   for (std::uint32_t slot = 0; slot < count; ++slot) {
     Node node;
     node.id = read<std::uint64_t>(in);
@@ -267,15 +285,37 @@ Index Index::load(const std::filesystem::path& path) {
     node.vector.resize(options.dimensions);
     in.read(reinterpret_cast<char*>(node.vector.data()),
             static_cast<std::streamsize>(node.vector.size() * sizeof(float)));
+    if (!in) throw std::runtime_error("truncated index file");
+    double norm = 0;
+    for (float value : node.vector) {
+      if (!std::isfinite(value)) throw std::runtime_error("invalid vector data");
+      norm += static_cast<double>(value) * value;
+    }
+    if (options.metric == Metric::cosine && std::abs(norm - 1.0) > 1e-5)
+      throw std::runtime_error("invalid cosine vector");
     node.links.resize(levels);
-    for (auto& layer : node.links) {
+    for (std::size_t level = 0; level < node.links.size(); ++level) {
+      auto& layer = node.links[level];
       const auto degree = read<std::uint32_t>(in);
+      const auto limit = static_cast<std::uint64_t>(options.max_connections) * (level == 0 ? 2 : 1);
+      if (degree > limit || degree > remaining(in, length) / sizeof(std::uint32_t))
+        throw std::runtime_error("invalid graph degree");
       for (std::uint32_t edge = 0; edge < degree; ++edge) layer.push_back(read<std::uint32_t>(in));
     }
     index.nodes_.push_back(std::move(node));
   }
-  if (count > 0 && (index.entry_ < 0 || static_cast<std::uint64_t>(index.entry_) >= count))
-    throw std::runtime_error("invalid entry point");
+  if (count == 0) {
+    if (index.entry_ != -1 || index.max_level_ != -1)
+      throw std::runtime_error("invalid empty index");
+  } else if (index.entry_ < 0 || static_cast<std::uint64_t>(index.entry_) >= count ||
+             index.max_level_ < 0 || index.max_level_ > 32 ||
+             index.nodes_[static_cast<std::size_t>(index.entry_)].links.size() !=
+                 static_cast<std::size_t>(index.max_level_ + 1)) {
+    throw std::runtime_error("invalid entry point or level");
+  }
+  for (const auto& node : index.nodes_)
+    if (node.links.size() > static_cast<std::size_t>(index.max_level_ + 1))
+      throw std::runtime_error("invalid node level");
   for (const auto& node : index.nodes_)
     for (std::size_t level = 0; level < node.links.size(); ++level)
       for (auto neighbor : node.links[level])

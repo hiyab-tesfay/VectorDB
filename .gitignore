@@ -1,6 +1,7 @@
 build/
+build-fuzz/
+build-fuzz-standalone/
 *.mvdb
 *.mvdb.tmp
 compile_commands.json
 .DS_Store
-

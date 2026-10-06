@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -52,13 +53,19 @@ int main(int argc, char** argv) {
       minivdb::Index index(options);
       std::ifstream input(argv[5]);
       if (!input) throw std::runtime_error("cannot open input file");
-      std::uint64_t id{};
-      while (input >> id) {
+      std::string line;
+      while (std::getline(input, line)) {
+        std::istringstream row(line);
+        std::string id;
+        if (!(row >> id)) continue;
         std::vector<float> vector(index.dimensions());
         for (float& value : vector)
-          if (!(input >> value)) throw std::runtime_error("incomplete vector row");
-        index.add(id, vector);
+          if (!(row >> value)) throw std::runtime_error("incomplete or invalid vector row");
+        std::string extra;
+        if (row >> extra) throw std::runtime_error("too many values in vector row");
+        index.add(integer(id.c_str()), vector);
       }
+      if (input.bad()) throw std::runtime_error("failed to read input file");
       index.save(argv[2]);
       std::cout << "built " << index.size() << " vectors\n";
     } else if (command == "add") {
@@ -88,4 +95,3 @@ int main(int argc, char** argv) {
     return 1;
   }
 }
-
